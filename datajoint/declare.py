@@ -208,15 +208,27 @@ def compile_foreign_key(line, context, attributes, primary_key, attr_sql, foreig
             attributes.append(attr)
             if primary_key is not None:
                 primary_key.append(attr)
-            attr_sql.append(
-                base.heading[ref_attr].sql.replace(ref_attr, attr, 1).replace('NOT NULL ', '', int(is_nullable)))
+
+            if context['dbType'] == 'sqlite':
+                # sqlite doesn't like the comment field...
+                newSql = base.heading[ref_attr].sql.replace(ref_attr, attr, 1).replace('NOT NULL ', '', int(is_nullable))
+                newSql = newSql[:newSql.find(r'COMMENT')]
+            else:
+                newSql = base.heading[ref_attr].sql.replace(ref_attr, attr, 1).replace('NOT NULL ', '', int(is_nullable))
+
+            attr_sql.append(newSql)
 
     # declare the foreign key
+    if context['dbType'] == 'sqlite':
+        tableRefName = base.table_name
+    else:
+        tableRefName = base.full_table_name
+
     foreign_key_sql.append(
         'FOREIGN KEY (`{fk}`) REFERENCES {ref} (`{pk}`) ON UPDATE CASCADE ON DELETE RESTRICT'.format(
             fk='`,`'.join(ref.primary_key),
             pk='`,`'.join(base.primary_key),
-            ref=base.full_table_name))
+            ref=tableRefName))
 
     # declare unique index
     if is_unique:
@@ -254,7 +266,10 @@ def prepare_declare(definition, context):
             if store:
                 external_stores.append(store)
             if in_key and name not in primary_key:
-                primary_key.append(name)
+                if 'PRIMARY KEY' in sql: # happens with sqlite
+                    pass
+                else:
+                    primary_key.append(name)
             if name not in attributes:
                 attributes.append(name)
                 attribute_sql.append(sql)
@@ -281,12 +296,31 @@ def declare(full_table_name, definition, context):
         definition, context)
 
     if not primary_key:
-        raise DataJointError('Table must have a primary key')
+        if 'dbType' in context and context['dbType'] =='sqlite':
+            if not any(['primary key' in att for att in attribute_sql]):
+                raise DataJointError('Table must have a primary key')
+        else:
+            raise DataJointError('Table must have a primary key')
 
-    return (
-        'CREATE TABLE IF NOT EXISTS %s (\n' % full_table_name +
-        ',\n'.join(attribute_sql + ['PRIMARY KEY (`' + '`,`'.join(primary_key) + '`)'] + foreign_key_sql + index_sql) +
-        '\n) ENGINE=InnoDB, COMMENT "%s"' % table_comment), external_stores
+    if not any(['primary key' in att for att in attribute_sql]):
+        primaryKeySql = ['PRIMARY KEY (`' + '`,`'.join(primary_key) + '`)']
+    else:
+        primaryKeySql = []
+
+    if 'dbType' in context and context['dbType']=='sqlite':
+        # note that the only purpose of CHECK(NULL) is because of how the code
+        # implementing comments for columns as defined in sqlite--it results in
+        # a hanging comma if there are no SQL statements but the attribute_sql;
+        # check null... allows us to ignore that!
+        return (
+            'CREATE TABLE IF NOT EXISTS %s (\n' % full_table_name +
+            ',\n'.join(attribute_sql + primaryKeySql + foreign_key_sql + index_sql) +
+            '\n CHECK(NULL))'), external_stores
+    else:
+        return (
+            'CREATE TABLE IF NOT EXISTS %s (\n' % full_table_name +
+            ',\n'.join(attribute_sql + primaryKeySql + foreign_key_sql + index_sql) +
+            '\n) ENGINE=InnoDB, COMMENT "%s"' % table_comment), external_stores
 
 
 def _make_attribute_alter(new, old, primary_key):
@@ -403,9 +437,15 @@ def substitute_special_type(match, category, foreign_key_sql, context):
             """.format(env=FILEPATH_FEATURE_SWITCH))
         match['store'] = match['type'].split('@', 1)[1]
         match['type'] = UUID_DATA_TYPE
+
+        if context['dbType'] == 'sqlite':
+            tableRefStr = "`{external_table_root}_{store}`".format(external_table_root=EXTERNAL_TABLE_ROOT, **match)
+        else:
+            tableRefStr = "`{{database}}`.`{external_table_root}_{store}`".format(external_table_root=EXTERNAL_TABLE_ROOT, **match)
+
         foreign_key_sql.append(
-            "FOREIGN KEY (`{name}`) REFERENCES `{{database}}`.`{external_table_root}_{store}` (`hash`) "
-            "ON UPDATE RESTRICT ON DELETE RESTRICT".format(external_table_root=EXTERNAL_TABLE_ROOT, **match))
+            "FOREIGN KEY (`{name}`) REFERENCES {tableRefStr} (`hash`) "
+            "ON UPDATE RESTRICT ON DELETE RESTRICT".format(external_table_root=EXTERNAL_TABLE_ROOT, tableRefStr=tableRefStr, **match))
     elif category == 'ADAPTED':
         adapter = get_adapter(context, match['type'])
         match['type'] = adapter.attribute_type
@@ -463,5 +503,29 @@ def compile_attribute(line, in_key, foreign_key_sql, context):
         raise DataJointError(
             'The default value for a blob or attachment attributes can only be NULL in:\n{line}'.format(line=line))
 
-    sql = ('`{name}` {type} {default}' + (' COMMENT "{comment}"' if match['comment'] else '')).format(**match)
+    if 'dbType' in context and context['dbType'] == 'sqlite':
+#        match['comment'] = ''
+
+        # sqlite doesn't support enum directly, so we've gotta instead add a check constraint
+        if category == 'ENUM':
+            enumValsSearch=r'enum\s*\((.+)\)$'
+            enumVals = re.search(enumValsSearch, match['type']).group(1)
+            match['type'] = 'CHECK (`{name}` IN ({enumVals}))'.format(name=match['name'], enumVals=enumVals)
+
+        if 'auto_increment' in match['type']:
+            if in_key: # this is the primary key
+                if re.match(TYPE_PATTERN['INTEGER'], match['type']):
+                    # this seems like a large leap, but integer primary keys
+                    # are already unsigned, and even if it's signed it
+                    # autoincrements... AND WHO WOULD WANT TO AUTOINCREMENT
+                    # STARTING AT A NEGATIVE NUMBER?! I.e. there may be failure
+                    # points, and we'll cross them when we get to them
+                    match['type'] = 'integer primary key' 
+            else:
+                print('sqlite has... issues... with auto_increment rows that aren''t the primary key')
+
+            match['type'] = re.sub(r'auto_increment', '', match['type']).strip() 
+
+    sql = ('`{name}` {type} {default}' + (', -- {comment}' if context['dbType'] == 'sqlite' else ' COMMENT "{comment}"')).format(**match)
+
     return match['name'], sql, match.get('store')
