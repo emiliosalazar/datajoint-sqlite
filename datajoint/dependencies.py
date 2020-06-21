@@ -28,36 +28,77 @@ class Dependencies(nx.DiGraph):
         self.clear()
 
         # load primary key info
-        keys = self._conn.query("""
-                SELECT
-                    concat('`', table_schema, '`.`', table_name, '`') as tab, column_name
-                FROM information_schema.key_column_usage
-                WHERE table_name not LIKE "~%%" AND table_schema in ('{schemas}') AND constraint_name="PRIMARY"
-                """.format(schemas="','".join(self._conn.schemas)))
-        pks = defaultdict(set)
-        for key in keys:
-            pks[key[0]].add(key[1])
+        if self._conn.conn_info['port'] == 'sqlite':
+            tablesAndKeys = self._conn.query("""
+                SELECT 
+                    m.name, p.name 
+                FROM 
+                    sqlite_master m 
+                    JOIN pragma_table_info(m.name) p 
+                WHERE m.type='table' AND m.name NOT LIKE '~%%' AND p.pk=1;
+                """).fetchall()
+
+            pks = defaultdict(set)
+            # in place comprehension
+            if len(self._conn.schemas)>1:
+                raise Exception("need to deal with sqlite and multiple schemas...")
+
+            [pks['`{schema}`.`{table_name}`'.format(schema="','".join(self._conn.schemas), table_name=tbl)].add(col) for tbl, col in tablesAndKeys]
+
+
+        else:
+            keys = self._conn.query("""
+                    SELECT
+                        concat('`', table_schema, '`.`', table_name, '`') as tab, column_name
+                    FROM information_schema.key_column_usage
+                    WHERE table_name not LIKE "~%%" AND table_schema in ('{schemas}') AND constraint_name="PRIMARY"
+                    """.format(schemas="','".join(self._conn.schemas)))
+            pks = defaultdict(set)
+            for key in keys:
+                pks[key[0]].add(key[1])
 
         # add nodes to the graph
         for n, pk in pks.items():
             self.add_node(n, primary_key=pk)
 
         # load foreign keys
-        keys = self._conn.query("""
-        SELECT constraint_name,
-            concat('`', table_schema, '`.`', table_name, '`') as referencing_table,
-            concat('`', referenced_table_schema, '`.`',  referenced_table_name, '`') as referenced_table,
-            column_name, referenced_column_name
-        FROM information_schema.key_column_usage
-        WHERE referenced_table_name NOT LIKE "~%%" AND (referenced_table_schema in ('{schemas}') OR
-            referenced_table_schema is not NULL AND table_schema in ('{schemas}'))
-        """.format(schemas="','".join(self._conn.schemas)), as_dict=True)
-        fks = defaultdict(lambda: dict(attr_map=OrderedDict()))
-        for key in keys:
-            d = fks[(key['constraint_name'], key['referencing_table'], key['referenced_table'])]
-            d['referencing_table'] = key['referencing_table']
-            d['referenced_table'] = key['referenced_table']
-            d['attr_map'][key['column_name']] = key['referenced_column_name']
+        if self._conn.conn_info['port'] == 'sqlite':
+            fkInfos = self._conn.query("""SELECT 
+                m.name AS referencing_table, 
+                p.'table' AS referenced_table,
+                p.'from' AS column_name,
+                p.'to' AS referenced_column_name
+            FROM
+                sqlite_master m
+                JOIN pragma_foreign_key_list(m.name) p 
+            WHERE m.type = 'table'
+            ORDER BY m.name
+            ;""", as_dict=True)
+            fks = defaultdict(lambda: dict(attr_map=OrderedDict()))
+            for fkInfo in fkInfos:
+                fkInfo['constraint_name'] = 'FOREIGN' # errm... temporary?
+                fkInfo['referencing_table'] = '`{schema}`.`{table_name}`'.format(schema="','".join(self._conn.schemas), table_name=fkInfo['referencing_table'])
+                fkInfo['referenced_table'] = '`{schema}`.`{table_name}`'.format(schema="','".join(self._conn.schemas), table_name=fkInfo['referenced_table'])
+                d = fks[(fkInfo['constraint_name'], fkInfo['referencing_table'], fkInfo['referenced_table'])]
+                d['referencing_table'] = fkInfo['referencing_table']
+                d['referenced_table'] = fkInfo['referenced_table']
+                d['attr_map'][fkInfo['column_name']] = fkInfo['referenced_column_name']
+        else:
+            keys = self._conn.query("""
+            SELECT constraint_name,
+                concat('`', table_schema, '`.`', table_name, '`') as referencing_table,
+                concat('`', referenced_table_schema, '`.`',  referenced_table_name, '`') as referenced_table,
+                column_name, referenced_column_name
+            FROM information_schema.key_column_usage
+            WHERE referenced_table_name NOT LIKE "~%%" AND (referenced_table_schema in ('{schemas}') OR
+                referenced_table_schema is not NULL AND table_schema in ('{schemas}'))
+            """.format(schemas="','".join(self._conn.schemas)), as_dict=True)
+            fks = defaultdict(lambda: dict(attr_map=OrderedDict()))
+            for key in keys:
+                d = fks[(key['constraint_name'], key['referencing_table'], key['referenced_table'])]
+                d['referencing_table'] = key['referencing_table']
+                d['referenced_table'] = key['referenced_table']
+                d['attr_map'][key['column_name']] = key['referenced_column_name']
 
         # add edges to the graph
         for fk in fks.values():
