@@ -5,12 +5,18 @@ This module contains the Connection class that manages the connection to the dat
 import warnings
 from contextlib import contextmanager
 import pymysql as client
+import sqlite3
 import logging
 from getpass import getpass
 
 from .settings import config
 from . import errors
 from .dependencies import Dependencies
+
+from .utils import OrderedDict
+
+#import os
+#logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
 
 # client errors to catch
 client_errors = (client.err.InterfaceError, client.err.DatabaseError)
@@ -105,25 +111,36 @@ class Connection:
     """
 
     def __init__(self, host, user, password, port=None, init_fun=None, use_tls=None):
-        if ':' in host:
-            # the port in the hostname overrides the port argument
-            host, port = host.split(':')
-            port = int(port)
-        elif port is None:
-            port = config['database.port']
+        if port != 'sqlite':
+            if ':' in host:
+                # the port in the hostname overrides the port argument
+                host, port = host.split(':')
+                port = int(port)
+            elif port is None:
+                port = config['database.port']
         self.conn_info = dict(host=host, port=port, user=user, passwd=password)
+
         if use_tls is not False:
             self.conn_info['ssl'] = use_tls if isinstance(use_tls, dict) else {'ssl': {}}
         self.conn_info['ssl_input'] = use_tls
         self.init_fun = init_fun
-        print("Connecting {user}@{host}:{port}".format(**self.conn_info))
+        
+        if port != 'sqlite':
+            print("Connecting {user}@{host}:{port}".format(**self.conn_info))
+        else:
+            print("Connecting to sqlite database {host}".format(**self.conn_info))
         self._conn = None
         self.connect()
+
         if self.is_connected:
-            logger.info("Connected {user}@{host}:{port}".format(**self.conn_info))
-            self.connection_id = self.query('SELECT connection_id()').fetchone()[0]
+            if port != 'sqlite':
+                logger.info("Connected {user}@{host}:{port}".format(**self.conn_info))
+                self.connection_id = self.query('SELECT connection_id()').fetchone()[0]
+            else:
+                logger.info("Connected to sqlite database {host}".format(**self.conn_info))
         else:
             raise errors.ConnectionError('Connection failed.')
+
         self._in_transaction = False
         self.schemas = dict()
         self.dependencies = Dependencies(self)
@@ -140,26 +157,32 @@ class Connection:
         """
         Connects to the database server.
         """
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', '.*deprecated.*')
-            try:
-                self._conn = client.connect(
-                    init_command=self.init_fun,
-                    sql_mode="NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,"
-                             "STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION",
-                    charset=config['connection.charset'],
-                    **{k: v for k, v in self.conn_info.items()
-                       if k != 'ssl_input'})
-            except client.err.InternalError:
-                self._conn = client.connect(
-                    init_command=self.init_fun,
-                    sql_mode="NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,"
-                             "STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION",
-                    charset=config['connection.charset'],
-                    **{k: v for k, v in self.conn_info.items()
-                       if not(k == 'ssl_input' or
-                              k == 'ssl' and self.conn_info['ssl_input'] is None)})
-        self._conn.autocommit(True)
+        if self.conn_info['port'] != 'sqlite':
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', '.*deprecated.*')
+                try:
+                    self._conn = client.connect(
+                        init_command=self.init_fun,
+                        sql_mode="NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,"
+                                 "STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION",
+                        charset=config['connection.charset'],
+                        **{k: v for k, v in self.conn_info.items()
+                           if k != 'ssl_input'})
+                except client.err.InternalError:
+                    self._conn = client.connect(
+                        init_command=self.init_fun,
+                        sql_mode="NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,"
+                                 "STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION",
+                        charset=config['connection.charset'],
+                        **{k: v for k, v in self.conn_info.items()
+                           if not(k == 'ssl_input' or
+                                  k == 'ssl' and self.conn_info['ssl_input'] is None)})
+            self._conn.autocommit(True)
+        else:
+            self._conn = sqlite3.connect(self.conn_info['host'])
+            # enforce foreign key constraints... which apparently isn't the
+            # default setting in sqlite O.o
+            self.query('PRAGMA foreign_keys=1') 
 
     def close(self):
         self._conn.close()
@@ -180,7 +203,11 @@ class Connection:
         """
         try:
             self.ping()
-        except:
+        except AttributeError:
+            if self.conn_info['port'] == 'sqlite':
+                return True
+            return False
+        else:
             return False
         return True
 
@@ -208,8 +235,25 @@ class Connection:
         if reconnect is None:
             reconnect = config['database.reconnect']
         logger.debug("Executing SQL:" + query[0:300])
-        cursor_class = client.cursors.DictCursor if as_dict else client.cursors.Cursor
-        cursor = self._conn.cursor(cursor=cursor_class)
+
+        if self.conn_info['port'] != 'sqlite':
+            cursor_class = client.cursors.DictCursor if as_dict else client.cursors.Cursor
+            cursor = self._conn.cursor(cursor=cursor_class)
+        else:
+            cursor_class = None
+            if as_dict:
+                # might not be the super most-efficient, but trying to match what MySQL would do
+                def dict_factory(cursor, row):
+                    d = {}
+                    for idx, col in enumerate(cursor.description):
+                        d[col[0]] = row[idx]
+                    d = OrderedDict(d) # this does nothing for Python 3.6+, buut... to maybe be backwards compatible?
+                    return d                
+                self._conn.row_factory = dict_factory
+            else:
+                self._conn.row_factory = None
+            cursor = self._conn.cursor()
+
         try:
             self._execute_query(cursor, query, args, cursor_class, suppress_warnings)
         except errors.LostConnectionError:
@@ -229,6 +273,8 @@ class Connection:
         """
         :return: the user name and host name provided by the client to the server.
         """
+        if self.conn_info['port'] == 'sqlite':
+            return self.conn_info['user']
         return self.query('SELECT user()').fetchone()[0]
 
     # ---------- transaction processing
@@ -246,7 +292,10 @@ class Connection:
         """
         if self.in_transaction:
             raise errors.DataJointError("Nested connections are not supported.")
-        self.query('START TRANSACTION WITH CONSISTENT SNAPSHOT')
+        if self.conn_info['port'] == 'sqlite':
+            self.query('BEGIN TRANSACTION') # seems not as strong as the 'with consistent snapshot' of mysql, but meh
+        else:
+            self.query('START TRANSACTION WITH CONSISTENT SNAPSHOT')
         self._in_transaction = True
         logger.info("Transaction started")
 
@@ -254,7 +303,13 @@ class Connection:
         """
         Cancels the current transaction and rolls back all changes made during the transaction.
         """
-        self.query('ROLLBACK')
+        try:
+            self.query('ROLLBACK')
+        except sqlite3.OperationalError as e:
+            # sqlite weirdly ends transactions early on its own, so we're
+            # catching whether this happens and letting things go as normal...
+            # more info: https://docs.python.org/2/library/sqlite3.html#sqlite3-controlling-transactions
+            pass
         self._in_transaction = False
         logger.info("Transaction cancelled. Rolling back ...")
 
@@ -263,7 +318,13 @@ class Connection:
         Commit all changes made during the transaction and close it.
 
         """
-        self.query('COMMIT')
+        try:
+            self.query('COMMIT')
+        except sqlite3.OperationalError as e:
+            # sqlite weirdly ends transactions early on its own, so we're
+            # catching whether this happens and letting things go as normal...
+            # more info: https://docs.python.org/2/library/sqlite3.html#sqlite3-controlling-transactions
+            pass
         self._in_transaction = False
         logger.info("Transaction committed and closed.")
 

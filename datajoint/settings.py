@@ -18,7 +18,7 @@ GLOBALCONFIG = '.datajoint_config.json'
 DEFAULT_SUBFOLDING = (2, 2)
 
 validators = collections.defaultdict(lambda: lambda value: True)
-validators['database.port'] = lambda a: isinstance(a, int)
+validators['database.port'] = lambda a: isinstance(a, int) or a == 'sqlite' # oops adding this to the validator...
 
 Role = Enum('Role', 'manual lookup imported computed job')
 role_to_prefix = {

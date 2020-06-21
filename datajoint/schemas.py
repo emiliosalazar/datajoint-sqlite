@@ -169,8 +169,11 @@ class Schema:
         """
         :return: true if the associated schema exists on the server
         """
-        cur = self.connection.query("SHOW DATABASES LIKE '{database}'".format(database=self.database))
-        return cur.rowcount > 0
+        if self.connection.conn_info['port']=='sqlite':
+            return True # for better or worse, sqlite will create the database if it doesn't exist
+        else:
+            cur = self.connection.query("SHOW DATABASES LIKE '{database}'".format(database=self.database))
+            return cur.rowcount > 0
 
     def process_table_class(self, table_class, context, assert_declared=False):
         """
