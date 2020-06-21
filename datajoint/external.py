@@ -245,10 +245,16 @@ class ExternalTable(Table):
             # upload the file and create its tracking entry
             self._upload_file(local_filepath, self._make_external_filepath(relative_filepath),
                               metadata={'contents_hash': str(contents_hash)})
-            self.connection.query(
-                "INSERT INTO {tab} (hash, size, filepath, contents_hash) VALUES (%s, {size}, '{filepath}', %s)".format(
-                    tab=self.full_table_name, size=Path(local_filepath).stat().st_size,
-                    filepath=relative_filepath), args=(uuid.bytes, contents_hash.bytes))
+            if self.connection.conn_info['port'] == 'sqlite':
+                self.connection.query(
+                    "INSERT INTO {tab} (hash, size, filepath, contents_hash) VALUES (?, {size}, '{filepath}', ?)".format(
+                        tab=self.full_table_name, size=Path(local_filepath).stat().st_size,
+                        filepath=relative_filepath), args=(uuid.bytes, contents_hash.bytes))
+            else:
+                self.connection.query(
+                    "INSERT INTO {tab} (hash, size, filepath, contents_hash) VALUES (%s, {size}, '{filepath}', %s)".format(
+                        tab=self.full_table_name, size=Path(local_filepath).stat().st_size,
+                        filepath=relative_filepath), args=(uuid.bytes, contents_hash.bytes))
         return uuid
 
     def download_filepath(self, filepath_hash):
