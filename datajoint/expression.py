@@ -361,6 +361,40 @@ class QueryExpression:
     def fetch(self):
         return Fetch(self)
 
+    def __getitem__(self, item):
+        if isinstance(item, (int)) or np.issubdtype(type(item), np.integer):
+            # note that there's no promise of ordering here...
+            allRes = self.fetch()
+            return allRes[item]
+        elif isinstance(item, str):
+            # note that there's no promise of ordering here...
+            try:
+                allRes = self.fetch(item)
+            except DataJointError as e:
+                # in case we're using a restriction expression
+                try:
+                    allRes = (self & item).fetch()
+                except Exception as e:
+                    raise e
+            return allRes
+        elif isinstance(item, dict) or (isinstance(item, np.ndarray) and item.dtype.names is not None):
+            return (self & item).fetch()
+        else:
+            try:
+                # This works for filtering items in one table by the other
+                # (i.e. a foreign key table by its keys), but the subscripting
+                # notation makes more sense to me than the & notation, because
+                # & makes it feel like a joint thing appears, whereas really
+                # this is the kind of filtering that subscripting/indexing does
+                allRes = (self & item).fetch()
+                print(type(item))
+            except:
+                raise TypeError("'%s' cannot be subscripted by '%s'" % (type(self).__name__, type(item).__name__))
+
+            return allRes
+#        elif isinstance(item, (list,slice, int, np.ndarray)) or np.issubdtype(type(item), np.integer)
+#            return self.fetch
+
     def head(self, limit=25, **fetch_kwargs):
         """
         shortcut to fetch the first few entries from query expression.
