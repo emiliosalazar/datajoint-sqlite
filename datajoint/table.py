@@ -58,6 +58,11 @@ class Table(QueryExpression):
         if self.connection.in_transaction:
             raise DataJointError('Cannot declare new tables inside a transaction, '
                                  'e.g. from inside a populate/make call')
+        if self.connection.conn_info['port']=='sqlite':
+            if context is None:
+                context = {}
+            context['dbType'] = 'sqlite'
+
         sql, external_stores = declare(self.full_table_name, self.definition, context)
         sql = sql.format(database=self.database)
         try:
@@ -145,6 +150,11 @@ class Table(QueryExpression):
         """
         :return: True is the table is declared in the schema.
         """
+        if self.connection.conn_info['port'] == 'sqlite':
+            return self.connection.query(
+                "SELECT name FROM sqlite_master WHERE type='table' and name LIKE '{table_name}';".format(
+                    table_name=self.table_name)).fetchone() is not None
+
         return self.connection.query(
             'SHOW TABLES in `{database}` LIKE "{table_name}"'.format(
                 database=self.database, table_name=self.table_name)).rowcount > 0
@@ -282,6 +292,10 @@ class Table(QueryExpression):
                         value = self.external[attr.store].upload_filepath(value).bytes
                     elif attr.numeric:
                         value = str(int(value) if isinstance(value, bool) else value)
+
+                if self.connection.conn_info['port'] == 'sqlite':
+                    placeholder = '?'
+
                 return name, placeholder, value
 
             def check_fields(fields):
@@ -336,19 +350,27 @@ class Table(QueryExpression):
         rows = list(make_row_to_insert(row) for row in rows)
         if rows:
             try:
+                if self.connection.conn_info['port'] == 'sqlite':
+                    duplicate=' ON CONFLICT(`{pk}`) DO UPDATE SET `{pk}`=`{pk}`'.format(pk=self.primary_key[0])
+                else:
+                    duplicate=' ON DUPLICATE KEY UPDATE `{pk}`=`{pk}`'.format(pk=self.primary_key[0])
+
                 query = "{command} INTO {destination}(`{fields}`) VALUES {placeholders}{duplicate}".format(
                     command='REPLACE' if replace else 'INSERT',
                     destination=self.from_clause,
                     fields='`,`'.join(field_list),
                     placeholders=','.join('(' + ','.join(row['placeholders']) + ')' for row in rows),
-                    duplicate=(' ON DUPLICATE KEY UPDATE `{pk}`=`{pk}`'.format(pk=self.primary_key[0])
-                               if skip_duplicates else ''))
+                    duplicate = (duplicate if skip_duplicates else ''))
+
                 self.connection.query(query, args=list(
                     itertools.chain.from_iterable((v for v in r['values'] if v is not None) for r in rows)))
             except UnknownAttributeError as err:
                 raise err.suggest('To ignore extra fields in insert, set ignore_extra_fields=True') from None
             except DuplicateError as err:
                 raise err.suggest('To ignore duplicate entries in insert, set skip_duplicates=True') from None
+
+        if self.connection.conn_info['port'] == 'sqlite':
+            self.connection._conn.commit() # sqlite requires a push to get things actually written heh...
 
     def delete_quick(self, get_count=False):
         """
@@ -357,7 +379,13 @@ class Table(QueryExpression):
         """
         query = 'DELETE FROM ' + self.full_table_name + self.where_clause
         self.connection.query(query)
-        count = self.connection.query("SELECT ROW_COUNT()").fetchone()[0] if get_count else None
+        if get_count:
+            if self.connection.conn_info['port'] == 'sqlite':
+                count = self.connection.query("SELECT changes()").fetchone()[0]
+            else:
+                count = self.connection.query("SELECT ROW_COUNT()").fetchone()[0]
+        else:
+            count = None
         self._log(query[:255])
         return count
 
