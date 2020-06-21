@@ -151,37 +151,88 @@ class Heading:
         """
         initialize heading from a database table.  The table must exist already.
         """
-        info = conn.query('SHOW TABLE STATUS FROM `{database}` WHERE name="{table_name}"'.format(
-            table_name=table_name, database=database), as_dict=True).fetchone()
-        if info is None:
-            if table_name == '~log':
-                logger.warning('Could not create the ~log table')
-                return
-            else:
-                raise DataJointError('The table `{database}`.`{table_name}` is not defined.'.format(
-                    table_name=table_name, database=database))
-        self.table_info = {k.lower(): v for k, v in info.items()}
 
-        cur = conn.query(
-            'SHOW FULL COLUMNS FROM `{table_name}` IN `{database}`'.format(
-                table_name=table_name, database=database), as_dict=True)
+        if conn.conn_info['port'] == 'sqlite':
+            self.table_info = {'comment' : ''} # no database comments in sqlite
+        else:
+            info = conn.query('SHOW TABLE STATUS FROM `{database}` WHERE name="{table_name}"'.format(
+                table_name=table_name, database=database), as_dict=True).fetchone()
+            if info is None:
+                if table_name == '~log':
+                    logger.warning('Could not create the ~log table')
+                    return
+                else:
+                    raise DataJointError('The table `{database}`.`{table_name}` is not defined.'.format(
+                        table_name=table_name, database=database))
+            self.table_info = {k.lower(): v for k, v in info.items()}
 
-        attributes = cur.fetchall()
+        if conn.conn_info['port'] == 'sqlite':
+            cur = conn.query(
+                "PRAGMA table_info('{table_name}')".format(
+                    table_name=table_name), as_dict=True)
+            # note that some of these are already named correctly, but I'm
+            # keeping it here to acknowledge that
+            rename_map = {
+                'name': 'name',
+                'type': 'type',
+                'notnull': 'nullable', # note this is inverted
+                'dflt_value': 'default',
+                'pk': 'in_key', # note that his isn't as descriptive as MySQL's 'key' field
+                }
+            fields_to_drop = ('Privileges', 'Collation')
+            attributes = cur.fetchall()
 
-        rename_map = {
-            'Field': 'name',
-            'Type': 'type',
-            'Null': 'nullable',
-            'Default': 'default',
-            'Key': 'in_key',
-            'Comment': 'comment'}
+            createSql = conn.query(
+                        "SELECT sql FROM sqlite_master WHERE name='{table_name}'".format(table_name=table_name)
+                        ).fetchone()[0] # result is tuple, so grab actual value...
+            createLines = createSql.split('\n')
+            comments = [re.match(r'.*?`(?P<type>.*)` .*?--(?P<comment>.*)', cL) for cL in createLines]
+            commentDict = {cm[1].strip() : cm[2].strip() for cm in comments if cm is not None}
 
-        fields_to_drop = ('Privileges', 'Collation')
+            for cols in attributes:
+                # to mach 'NULL' output of MySQL
+                if cols['notnull']:
+                    cols['notnull'] = 'NO'
+                else:
+                    cols['notnull'] = 'YES'
+
+                # gets closer to MySQL, as much as DataJoint needs, I hope
+                if cols['pk']:
+                    cols['pk'] = 'PRI'
+
+                if 'auto_increment' in cols['type']:
+                    locAutoIncrementSt = cols['type'].find('auto_increment')
+                    lenAutoIncrement = len('auto_increment')
+                    locAutoIncrementEnd = locAutoIncrementSt + lenAutoIncrement
+                    cols['Extra'] = 'auto_increment'
+                    cols['type'] = cols['type'][:locAutoIncrementSt] + cols['type'][locAutoIncrementEnd:]
+
+                cols['comment'] = commentDict[cols['name']] if cols['name'] in commentDict else ''
+                
+                cols.pop('cid', None)
+                    
+        else:
+            cur = conn.query(
+                'SHOW FULL COLUMNS FROM `{table_name}` IN `{database}`'.format(
+                    table_name=table_name, database=database), as_dict=True)
+
+            rename_map = {
+                'Field': 'name',
+                'Type': 'type',
+                'Null': 'nullable',
+                'Default': 'default',
+                'Key': 'in_key',
+                'Comment': 'comment'}
+            fields_to_drop = ('Privileges', 'Collation')
+
+            attributes = cur.fetchall()
 
         # rename and drop attributes
         attributes = [{rename_map[k] if k in rename_map else k: v
                        for k, v in x.items() if k not in fields_to_drop}
                       for x in attributes]
+
+
 
         numeric_types = {
             ('float', False): np.float64,
@@ -196,6 +247,8 @@ class Heading:
             ('mediumint', True): np.int64,
             ('int', False): np.int64,
             ('int', True): np.int64,
+            ('integer', False): np.int64,
+            ('integer', True): np.int64,
             ('bigint', False): np.int64,
             ('bigint', True): np.uint64}
 
@@ -208,7 +261,7 @@ class Heading:
                 in_key=(attr['in_key'] == 'PRI'),
                 database=database,
                 nullable=attr['nullable'] == 'YES',
-                autoincrement=bool(re.search(r'auto_increment', attr['Extra'], flags=re.I)),
+                autoincrement=bool(re.search(r'auto_increment', attr['Extra'] if 'Extra' in attr else "", flags=re.I)),
                 numeric=any(TYPE_PATTERN[t].match(attr['type']) for t in ('DECIMAL', 'INTEGER', 'FLOAT')),
                 string=any(TYPE_PATTERN[t].match(attr['type']) for t in ('ENUM', 'TEMPORAL', 'STRING')),
                 is_blob=bool(TYPE_PATTERN['INTERNAL_BLOB'].match(attr['type'])),
@@ -218,7 +271,7 @@ class Heading:
             if any(TYPE_PATTERN[t].match(attr['type']) for t in ('INTEGER', 'FLOAT')):
                 attr['type'] = re.sub(r'\(\d+\)', '', attr['type'], count=1)  # strip size off integers and floats
             attr['unsupported'] = not any((attr['is_blob'], attr['numeric'], attr['numeric']))
-            attr.pop('Extra')
+            attr.pop('Extra', None) # prevents key errors
 
             # process custom DataJoint types
             special = re.match(r':(?P<type>[^:]+):(?P<comment>.*)', attr['comment'])
@@ -283,9 +336,16 @@ class Heading:
                 is_integer = TYPE_PATTERN['INTEGER'].match(attr['type'])
                 is_float = TYPE_PATTERN['FLOAT'].match(attr['type'])
                 if is_integer and not attr['nullable'] or is_float:
+                    # I think 'sunsigned' is a typo that has no effect because True/False pairings both exist in numeric_types
                     is_unsigned = bool(re.match('sunsigned', attr['type'], flags=re.I))
                     t = re.sub(r'\(.*\)', '', attr['type'])    # remove parentheses
-                    t = re.sub(r' unsigned$', '', t)   # remove unsigned
+                    if conn.conn_info['port'] == 'sqlite':
+                        # remove unsigned and surrounding spaces; likely also
+                        # works with MySQL output, but I don't want to play
+                        # with code I don't need to play with heh
+                        t = re.sub(r'unsigned', '', t).strip() 
+                    else:
+                        t = re.sub(r' unsigned$', '', t)   # remove unsigned
                     assert (t, is_unsigned) in numeric_types, 'dtype not found for type %s' % t
                     attr['dtype'] = numeric_types[(t, is_unsigned)]
 
@@ -297,12 +357,32 @@ class Heading:
 
         # Read and tabulate secondary indexes
         keys = defaultdict(dict)
-        for item in conn.query('SHOW KEYS FROM `{db}`.`{tab}`'.format(db=database, tab=table_name), as_dict=True):
-            if item['Key_name'] != 'PRIMARY':
-                keys[item['Key_name']][item['Seq_in_index']] = dict(
-                    column=item['Column_name'],
-                    unique=(item['Non_unique'] == 0),
-                    nullable=item['Null'].lower() == 'yes')
+        if conn.conn_info['port'] == 'sqlite':
+            # NOTE it's entirely likely this will fail on first pass because I
+            # haven't tested it with a table that *actually* has a foreign key
+            # yet...
+            keySet = conn.query( """
+                SELECT
+                    origin, pil.name as Key_name, seqno, pif.name as Column_name, pil.`unique` as is_unique, partial
+                FROM
+                    pragma_index_list('{table_name}') AS pil
+                    JOIN pragma_index_info(pil.name) AS pif""".format( table_name=table_name), as_dict=True).fetchall()
+        else:
+            keySet = conn.query('SHOW KEYS FROM `{db}`.`{tab}`'.format(db=database, tab=table_name), as_dict=True) 
+        for item in keySet:
+            if conn.conn_info['port'] == 'sqlite':
+                if item['origin'] != 'pk':
+                    keys[item['Key_name']][item['seqno']] = dict(
+                        column = item['Column_name'],
+                        unique = (item['is_unique'] == 1),
+                        nullable = (item['partial'] == 1) # pretty sure this is parallel to MySQL's nullable...
+                    )
+            else:
+                if item['Key_name'] != 'PRIMARY':
+                    keys[item['Key_name']][item['Seq_in_index']] = dict(
+                        column=item['Column_name'],
+                        unique=(item['Non_unique'] == 0),
+                        nullable=item['Null'].lower() == 'yes')
         self.indexes = {
             tuple(item[k]['column'] for k in sorted(item.keys())):
                 dict(unique=item[1]['unique'],
