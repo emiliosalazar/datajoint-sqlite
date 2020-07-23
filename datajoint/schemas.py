@@ -117,9 +117,14 @@ class Schema:
                 frame = inspect.currentframe().f_back
                 context = frame.f_locals
                 del frame
-        tables = [
-            row[0] for row in self.connection.query('SHOW TABLES in `%s`' % self.database)
-            if lookup_class_name('`{db}`.`{tab}`'.format(db=self.database, tab=row[0]), context, 0) is None]
+        if self.context['dbPort'] != 'sqlite':
+            tables = [
+                row[0] for row in self.connection.query('SHOW TABLES in `%s`' % self.database)
+                if lookup_class_name('`{db}`.`{tab}`'.format(db=self.database, tab=row[0]), context, 0) is None]
+        else:
+            tables = [
+                row[0] for row in self.connection.query("SELECT name FROM sqlite_master WHERE type='table'")
+                if lookup_class_name('`{db}`.`{tab}`'.format(db=self.database, tab=row[0]), context, 0) is None]
         master_classes = (Lookup, Manual, Imported, Computed)
         part_tables = []
         for table_name in tables:
