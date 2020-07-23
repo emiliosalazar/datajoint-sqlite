@@ -616,16 +616,25 @@ class Table(QueryExpression):
 
         if attr.is_blob:
             value = blob.pack(value)
-            placeholder = '%s'
+            if self.connection.conn_info['port'] == 'sqlite':
+                placeholder = '?'
+            else:
+                placeholder = '%s'
         elif attr.numeric:
             if value is None or np.isnan(np.float(value)):  # nans are turned into NULLs
                 placeholder = 'NULL'
                 value = None
             else:
-                placeholder = '%s'
+                if self.connection.conn_info['port'] == 'sqlite':
+                    placeholder = '?'
+                else:
+                    placeholder = '%s'
                 value = str(int(value) if isinstance(value, bool) else value)
         else:
-            placeholder = '%s' if value is not None else 'NULL'
+            if self.connection.conn_info['port'] == 'sqlite':
+                placeholder = '?' if value is not None else 'NULL'
+            else:
+                placeholder = '%s' if value is not None else 'NULL'
         command = "UPDATE {full_table_name} SET `{attrname}`={placeholder} {where_clause}".format(
             full_table_name=self.from_clause,
             attrname=attrname,
