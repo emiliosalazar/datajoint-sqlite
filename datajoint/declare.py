@@ -220,7 +220,10 @@ def compile_foreign_key(line, context, attributes, primary_key, attr_sql, foreig
 
     # declare the foreign key
     if context['dbType'] == 'sqlite':
-        tableRefName = base.table_name
+        # these tics (which appear in full_table_name) are needed especially
+        # because Lookup tables add a # character which messes with SQLite if
+        # the table_name includes that (and other symbolic) characters
+        tableRefName = '`' + base.table_name + '`'
     else:
         tableRefName = base.full_table_name
 
