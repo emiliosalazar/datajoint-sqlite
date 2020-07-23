@@ -402,9 +402,13 @@ class Table(QueryExpression):
                                  'Set dj.config["safemode"] = False or complete the ongoing transaction first.')
         graph = conn.dependencies
         graph.load()
+
+        schemaName = self.database
+        ct = self.connection.schemas[schemaName].context
+        self.connection.schemas[schemaName].spawn_missing_classes(context=ct) 
         delete_list = collections.OrderedDict(
-            (name, _RenameMap(next(iter(graph.parents(name).items()))) if name.isdigit() else FreeTable(conn, name))
-            for name in graph.descendants(self.full_table_name))
+            (name , _RenameMap(next(iter(graph.parents(name).items()))) if name.isdigit() else (ct[lookup_class_name(name, context=ct)]()) if lookup_class_name(name, context=ct) in ct else FreeTable(conn, name)) for name in graph.descendants(self.full_table_name)
+            )
 
         # construct restrictions for each relation
         restrict_by_me = set()
