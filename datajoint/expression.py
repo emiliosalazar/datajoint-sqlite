@@ -362,6 +362,7 @@ class QueryExpression:
         return Fetch(self)
 
     def __getitem__(self, item):
+        # NOTE: int and non-expression str don't return expression types, but the rest do
         if isinstance(item, (int)) or np.issubdtype(type(item), np.integer):
             # note that there's no promise of ordering here...
             allRes = self.fetch()
@@ -373,12 +374,12 @@ class QueryExpression:
             except DataJointError as e:
                 # in case we're using a restriction expression
                 try:
-                    allRes = (self & item).fetch()
+                    allRes = (self & item)
                 except Exception as e:
                     raise e
             return allRes
         elif isinstance(item, dict) or (isinstance(item, np.ndarray) and item.dtype.names is not None):
-            return (self & item).fetch()
+            return (self & item)
         else:
             try:
                 # This works for filtering items in one table by the other
@@ -386,8 +387,7 @@ class QueryExpression:
                 # notation makes more sense to me than the & notation, because
                 # & makes it feel like a joint thing appears, whereas really
                 # this is the kind of filtering that subscripting/indexing does
-                allRes = (self & item).fetch()
-                print(type(item))
+                allRes = (self & item)
             except:
                 raise TypeError("'%s' cannot be subscripted by '%s'" % (type(self).__name__, type(item).__name__))
 
