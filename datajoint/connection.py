@@ -257,16 +257,39 @@ class Connection:
 
         try:
             self._execute_query(cursor, query, args, cursor_class, suppress_warnings)
-        except errors.LostConnectionError:
-            if not reconnect:
-                raise
-            warnings.warn("MySQL server has gone away. Reconnecting to the server.")
-            self.connect()
-            if self._in_transaction:
-                self.cancel_transaction()
-                raise errors.LostConnectionError("Connection was lost during a transaction.") from None
-            logger.debug("Re-executing")
-            cursor = self._conn.cursor(cursor=cursor_class)
+        except (errors.LostConnectionError, sqlite3.DatabaseError) as e:
+            if self.conn_info['port'] != 'sqlite':
+                if not reconnect:
+                    raise
+                warnings.warn("MySQL server has gone away. Reconnecting to the server.")
+                self.connect()
+                if self._in_transaction:
+                    self.cancel_transaction()
+                    raise errors.LostConnectionError("Connection was lost during a transaction.") from None
+                logger.debug("Re-executing")
+                cursor = self._conn.cursor(cursor=cursor_class)
+            else:
+                print(e)
+                if isinstance(e, sqlite3.OperationalError):
+                    # I don't think the stale database connection issue is an OperationalError... but we'll see
+                    print(e)
+                    raise(e) #upstream will handle commit errors
+                elif isinstance(e, sqlite3.IntegrityError):
+                    print(e)
+                    raise(e) #upstream will handle commit errors
+                elif isinstance(e, sqlite3.ProgrammingError):
+                    print(e)
+                    raise(e)
+                if not reconnect:
+                    raise
+                warnings.warn("SQLite file is probably out of date. Flushing and reconnecting.")
+                # not even sure if this is possible with SQLite...
+                if self._in_transaction:
+                    self.cancel_transaction()
+                    raise errors.LostConnectionError("Connection was lost during a transaction.") from None
+                self.close()
+                self.connect()
+                cursor = self._conn.cursor()
             self._execute_query(cursor, query, args, cursor_class, suppress_warnings)
         return cursor
 
