@@ -324,4 +324,8 @@ def list_schemas(connection=None):
     :param connection: a dj.Connection object
     :return: list of all accessible schemas on the server
     """
-    return [r[0] for r in (connection or conn()).query('SHOW SCHEMAS') if r[0] not in {'information_schema'}]
+    connection = connection or conn()
+    if connection.conn_info['port'] == 'sqlite':
+        return [r[0] for r in connection.query('SELECT name FROM pragma_database_list') if r[0] not in {'information_schema'}]
+    else:
+        return [r[0] for r in connection.query('SHOW SCHEMAS') if r[0] not in {'information_schema'}]
