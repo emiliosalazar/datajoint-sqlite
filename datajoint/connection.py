@@ -179,6 +179,11 @@ class Connection:
                                   k == 'ssl' and self.conn_info['ssl_input'] is None)})
             self._conn.autocommit(True)
         else:
+            bashCommand = "fs flush '%s'" % self.conn_info['host']
+            import subprocess
+            process = subprocess.Popen(bashCommand, shell=True)
+            output, error = process.communicate()
+
             # we set isolation_level to None to avoid Python's sqlite library from overruling transaction begin/ends
             self._conn = sqlite3.connect(self.conn_info['host'], isolation_level=None)
             # enforce foreign key constraints... which apparently isn't the
